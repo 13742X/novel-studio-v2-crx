@@ -1023,7 +1023,7 @@ function migrate(p){
 }
 function shell(){document.body.classList.toggle("focus",focusMode&&view==="chap");
  $("#proj").innerHTML=all.map(p=>`<option value="${p.id}" ${p.id===P.id?"selected":""}>${esc(p.name||"Untitled")}</option>`).join("")+'<option value="__new">+ New project</option>';
- $("#menu").innerHTML=VIEWS.map(v=>`<a data-v="${v[0]}" title="${v[1]}" class="${v[0]===view?"on":""}"><span class="ic">${v[2]}</span><span class="lb">${v[1]}</span></a>`).join("")+(CAN_WIN&&!WIN?`<a data-act="popout" title="Open Novel Studio in its own window (closes the side panel)"><span class="ic">⧉</span><span class="lb">Pop out</span></a>`:"");
+ $("#menu").innerHTML=navHTML()+(CAN_WIN&&!WIN?`<a data-act="popout" title="Open Novel Studio in its own window (closes the side panel)"><span class="ic">⧉</span><span class="lb">Pop out</span></a>`:"");
  const on=$("#menu a.on");if(on&&on.scrollIntoView)on.scrollIntoView({block:"nearest",inline:"nearest"});
 }
 function render(){try{syncBible(P)}catch(e){console.warn("[novel-studio] sync",e)}shell();$("#main").innerHTML=bkBanner()+V[view]();document.querySelectorAll("#main [placeholder]").forEach(e=>{if(!e.title)e.title=e.placeholder});if(window.cp)cp.style.display="none";const t=document.querySelector(".ms");if(t)upd();kpi();if(view==="board")lines();if(view==="ai")updTok()}
@@ -1093,7 +1093,6 @@ proj(){const pl=P.plot,sw=wc(P.synopsis),fk=Object.keys(FRAMEWORKS);
  const threads=pl.threads.map((t,j)=>{const k=`plot.threads.${j}.`;return`<div class="box"><div class="row" style="flex-wrap:nowrap"><input data-k="${k}name" value="${esc(t.name)}" placeholder="Thread name, e.g. The blackmail" aria-label="Thread name" style="font-weight:600"><select data-k="${k}type" style="max-width:170px;flex:none" aria-label="Type">${THREAD_TYPES.map(x=>`<option ${x===t.type?"selected":""}>${esc(x)}</option>`).join("")}</select><select data-k="${k}status" style="max-width:120px;flex:none" aria-label="Status">${THREAD_STATUS.map(x=>`<option ${x===t.status?"selected":""}>${esc(x)}</option>`).join("")}</select><button class="sm" data-act="delthread" data-i="${j}" title="Remove thread">×</button></div><div class="row">${chSel(k+"setup",t.setup,"Opens: chapter not set")}${chSel(k+"payoff",t.payoff,"Pays off: chapter not set")}</div><textarea data-k="${k}notes" rows="2" placeholder="What the thread is, how it develops, how it ends">${esc(t.notes)}</textarea></div>`}).join("");
  return`<h2>Project</h2>
 <p class="mute">Everything here is assembled into the <b>Novel Bible</b> that the AI reads. Chapter tasks get only the act, story beats and threads that apply to that chapter, so the more precisely you place them, the better the AI stays on course. <button class="sm" data-act="viewnovel">View generated Novel Bible</button></p>
-${bpPanel()}
 <h3>Identity &amp; pitch</h3>
 <div class="box">
  <div class="row">
@@ -2351,7 +2350,130 @@ function bridgePanel(){
  <div class="row"><button class="pri" data-bact="send">3. Send to bridge</button><button data-bact="status">Check progress</button><button data-bact="load">4. Load result</button><button data-bact="pause">Pause</button><button data-bact="resume">Clear pause</button></div>
  <div class="row"><button class="sm" data-bact="pick">${brDir?"Change":"Link"} bridge folder</button>${brDir?`<button class="sm" data-bact="unlink">Unlink</button>`:""}<span class="mute">${brDir?"Linked: “"+esc(brDir.name)+"”":"No folder linked (download and upload still work)"}</span></div>
  ${brMsg?`<div class="box" style="margin:8px 0 0;white-space:pre-wrap">${esc(brMsg)}</div>`:""}</details>`}
-{const _pj=V.proj;V.proj=()=>{const h=_pj(),k=h.indexOf("<h3>Identity &amp; pitch</h3>");return k>0?h.slice(0,k)+(llmPanel()+bridgePanel())+h.slice(k):(llmPanel()+bridgePanel())+h}}
+{const _st=V.set;V.set=()=>_st()+llmPanel()}
+
+/* ---------- Workflow: Blueprint -> First Draft -> Edit. Reuses the blueprint import/export and the bridge code above. ---------- */
+const NAV=[["dash","Dashboard","📊"],["proj","Project","📘"],
+ {grp:"Workflow",items:[["bp","Blueprint","🧭"],["draft","First Draft","✍️"],["edit","Edit","🪶"]]},
+ {grp:"Canon",items:[["bible","Story Bible","📖"],["chars","Characters","👥"],["locs","Places & Lore","🗺️"],["chap","Chapters","✍️"],["time","Story Timeline","⏳"],["board","Whiteboard","🧩"],["notes","Notes","📝"],["subs","Submissions","📬"],["ai","AI Toolkit","🤖"],["export","Export & Downloads","⬇️"]]}];
+const WF_VIEWS=["bp","draft","edit"];
+const wf=()=>P.wf=Object.assign({confirmed:"",confirmedAt:"",run:null},P.wf||{});
+/* the blueprint as the AI sees it, minus anything that changes just because chapters got written */
+function wfHash(){const j=blueprintJSON();delete j.voiceSample;const s=JSON.stringify(j);let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h+s.charCodeAt(i))|0;return String(h)}
+const wfOK=()=>{const w=wf();return !!w.confirmed&&w.confirmed===wfHash()};
+const wfWritten=()=>P.chapters.filter(c=>rv(c.text)).length;
+function navHTML(){
+ const lock=v=>v==="draft"&&!wfOK()&&!wfWritten()?" 🔒":"";
+ const a=v=>`<a data-v="${v[0]}" title="${v[1]}" class="${v[0]===view?"on":""}"><span class="ic">${v[2]}</span><span class="lb">${v[1]}${lock(v[0])}</span></a>`;
+ const g=n=>`<div class="mute" style="padding:12px 12px 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase">${n}</div>`;
+ const gear=`<a data-v="set" title="Settings" aria-label="Settings" class="${view==="set"?"on":""}" style="float:right;display:block;font-size:20px;line-height:1;padding:10px 12px;cursor:pointer;text-decoration:none">⚙️</a>`;
+ return gear+NAV.map(x=>Array.isArray(x)?a(x):g(x.grp)+x.items.map(a).join("")).join("")}
+
+/* live progress: polls the bridge's response file every 4s and updates only #wfprog, so typed text elsewhere is never lost */
+let wfLast=null;
+function wfProgHTML(){
+ const s=wfLast;if(!s)return`<span class="mute">No run yet. Progress shows here while bridge.py works.</span>`;
+ const pct=s.total?Math.round(s.done/s.total*100):0;
+ const state=s.kind==="complete"?"Finished. Ready to load.":s.live?(s.age!==null&&s.age<45?"Working":"No heartbeat for "+s.age+"s (slow model call, paused, or bridge stopped)"):(s.status||"Stopped");
+ return`<div><b>${esc(state)}</b>${s.detail?`<div class="mute">${esc(s.detail)}</div>`:""}</div>
+ <div style="height:10px;background:rgba(128,128,128,.25);border-radius:5px;margin:8px 0;overflow:hidden"><div style="height:100%;width:${pct}%;background:currentColor;opacity:.6"></div></div>
+ <div class="mute">${s.done} of ${s.total} chapters with text · ${s.words.toLocaleString()} words</div>
+ ${s.error?`<div class="box warn" style="margin-top:6px;white-space:pre-wrap">${esc(s.error)}</div>`:""}
+ ${s.kind==="complete"?`<div class="row" style="margin-top:8px"><button class="pri" data-bact="load">Load result into Novel Studio</button></div>`:""}
+ ${s.log?`<details style="margin-top:8px"><summary class="mute">Activity log</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:220px;overflow:auto">${esc(s.log)}</pre></details>`:""}`}
+async function wfPoll(){
+ if(!WF_VIEWS.includes(view)||!brDir)return;
+ try{
+  if(!await brPerm(false))return;
+  const f=await brFile();
+  if(!f)wfLast=null;
+  else{
+   const j=JSON.parse(f.text),b=j._bridge||{},chs=j.chapters||[],hb=b.heartbeat||b.updated;
+   let lg="";try{const t=await brRead(await brSub("logs"),"bridge.log");if(t)lg=t.trim().split("\n").slice(-12).join("\n")}catch(e){}
+   wfLast={kind:f.kind,status:b.status||"",detail:b.detail||"",done:chs.filter(c=>rv(c.text)).length,total:chs.length,words:chs.reduce((a,c)=>a+wc(c.text),0),
+    age:hb?Math.round((Date.now()-new Date(hb).getTime())/1000):null,error:b.error||"",log:lg,
+    live:f.kind!=="complete"&&b.active!==false&&!/^(complete|failed|paused|finished)/.test(b.status||"")};
+  }
+  const el=$("#wfprog");if(el)el.innerHTML=wfProgHTML();
+ }catch(e){}}
+setInterval(wfPoll,4000);
+
+/* shared pieces */
+const wfBox=(title,body)=>`<div class="box" style="margin:10px 0"><b>${title}</b><div style="margin-top:8px">${body}</div></div>`;
+function wfSteps(){
+ const ok=wfOK(),w=wfWritten(),n=P.chapters.length,st=(i,t,s)=>`<span style="margin-right:18px">${i}. <b>${t}</b> <span class="mute">${s}</span></span>`;
+ return`<div class="box" style="margin:8px 0 14px">${st(1,"Blueprint",ok?"confirmed ✓":"not confirmed")}${st(2,"First Draft",w?w+" of "+n+" chapters written":ok?"ready to start":"locked")}${st(3,"Edit",w?"ready":"needs a draft")}</div>`}
+const wfMsg=()=>brMsg?`<div class="box" style="margin:10px 0;white-space:pre-wrap">${esc(brMsg)}</div>`:"";
+function wfLinkBox(){
+ if(brDir===undefined){brDir=null;brLoadDir().then(render)}
+ return wfBox("Bridge folder",`<div class="row"><button class="sm" data-bact="pick">${brDir?"Change":"Link"} bridge folder</button>${brDir?`<button class="sm" data-bact="unlink">Unlink</button>`:""}<button class="sm" data-bact="status" title="Full diagnostic: folder contents, state files and the log">Diagnostics</button><button class="sm" data-bact="pause">Pause</button><button class="sm" data-bact="resume">Clear pause</button><span class="mute">${brDir?"Linked: “"+esc(brDir.name)+"”":"Not linked. Live progress needs the folder that bridge.py uses."} Models and Ollama address are in Settings.</span></div>`)}
+const wfProgBox=title=>wfBox(title,`<div id="wfprog">${wfProgHTML()}</div>`);
+
+/* Blueprint (mode "bp") and Edit (mode "edit") are the same screen: template and import on top, then the mode's controls, then live progress */
+function wfScreen(mode){
+ const E=mode==="edit",w=wfWritten();
+ const panel=bpPanel().replace("<details class=\"box\"","<details open class=\"box\"");
+ let ctl;
+ if(!E){
+  const ch=P.chapters.length,planned=P.chapters.filter(c=>rv(c.summary)).length,chars=P.characters.filter(x=>x.name).length,places=(P.locations||[]).filter(x=>x.name).length;
+  const issues=[];if(voiceIsTemplate())issues.push("Voice & Style is still the blank template, so the draft will be in a generic voice");
+  if(planned<ch)issues.push((ch-planned)+" of "+ch+" chapters have no summary");if(!chars)issues.push("no characters yet");
+  const ok=wfOK(),W=wf();
+  ctl=wfBox("Confirm the Blueprint",`<div class="mute">${ch} chapters planned · ${chars} characters · ${places} places &amp; lore entries</div>
+   ${issues.length?`<div class="box warn" style="margin:8px 0">${issues.map(x=>"• "+esc(x)).join("<br>")}</div>`:""}
+   ${ok?`<p>Confirmed ${esc(new Date(W.confirmedAt).toLocaleString())}. If you change anything in the Blueprint, First Draft locks again until you confirm.</p><div class="row"><button class="pri" data-v="draft">Go to First Draft</button><button data-wf="unconfirm">Withdraw confirmation</button></div>`
+     :`<p>When you are happy with the Blueprint package, confirm it to unlock First Draft.</p><div class="row"><button class="pri" data-wf="confirm">I'm happy with this Blueprint</button></div>`}`);
+ }else{
+  if(brMode==="write")brMode="audit";
+  ctl=wfBox("AI editor",w?`<p class="mute">The editor works on chapters that already have text: <b>audit and fix</b> corrects continuity and craft problems, <b>rewrite</b> polishes the prose as well. Your current text is kept in Version History when the result is loaded.</p>
+   <div class="row"><select id="brmode"><option value="audit" ${brMode==="audit"?"selected":""}>Audit and fix</option><option value="edit" ${brMode==="edit"?"selected":""}>Rewrite (polish)</option></select><input id="brrange" value="${esc(brRange)}" placeholder="Chapters: all, 3 or 1-5" style="max-width:170px"><button class="pri" data-wf="sendedit">Send to AI editor</button><button data-bact="load">Load edited result</button></div>`
+   :`<p>There is no chapter text to edit yet. Run the <a data-v="draft" style="cursor:pointer;text-decoration:underline">First Draft</a> first, or upload a populated Blueprint that contains prose.</p>`);
+ }
+ const fin=E?wfBox("Final package",`<p class="mute">The finished book: blueprint, voice, summaries and every chapter's prose in one file, ready to send back to an AI for a last tightening pass.</p><div class="row"><button class="pri" data-wf="dlfinal" ${w?"":"disabled"}>Download final package (.json)</button><button data-wf="dlnovel" ${w?"":"disabled"}>Download manuscript (.doc)</button></div>`):"";
+ return`<h2>${E?"Edit":"Blueprint"}</h2>${wfSteps()}
+ <p class="mute">${E?"Same layout as the Blueprint, with the AI editor at work. Download the template, send it to your AI, upload the improved version, then run the editor.":"Download the template, fill it in with your AI, upload it here, and keep tightening until you are happy. Watch First Draft runs here too."}</p>
+ <div class="row" style="margin:8px 0"><button data-wf="dlbp">Download template / current state</button></div>
+ ${panel}${ctl}${wfLinkBox()}${wfMsg()}${wfProgBox(E?"AI editor at work":"Live progress")}${fin}`}
+
+/* First Draft */
+function wfDraft(){
+ const ok=wfOK(),w=wfWritten(),n=P.chapters.length;
+ if(!ok&&!w)return`<h2>First Draft</h2>${wfSteps()}${wfBox("Locked",`<p>Confirm the Blueprint first. ${wf().confirmed?"It has changed since you confirmed it.":""}</p><div class="row"><button class="pri" data-v="bp">Go to Blueprint</button></div>`)}`;
+ const start=ok&&!w?wfBox("Start",`<p class="mute">bridge.py writes every chapter in order through Ollama, summarising each one as it goes. Keep bridge.py running against the linked folder.</p><div class="row"><button class="pri" data-wf="start" ${brDir?"":"disabled"}>Start first draft</button>${brDir?"":`<span class="mute">Link the bridge folder below first.</span>`}</div>`):"";
+ const rows=P.chapters.map((c,i)=>`<tr><td>${i+1}</td><td>${esc(c.title||"Untitled")}</td><td>${wc(c.text).toLocaleString()}</td><td><button class="sm" data-open="${i}">Open</button></td></tr>`).join("");
+ const review=w?wfBox("Review",`<div class="mute">${w} of ${n} chapters written · ${P.chapters.reduce((a,c)=>a+wc(c.text),0).toLocaleString()} words</div>
+  <div style="max-height:320px;overflow:auto;margin:8px 0"><table style="width:100%"><tr><th align="left">#</th><th align="left">Chapter</th><th align="left">Words</th><th></th></tr>${rows}</table></div>
+  <div class="row"><button class="pri" data-v="edit">Edit</button><button data-wf="rerun" title="Clears every chapter's prose, keeps everything else, and restarts from the Blueprint page">Re-Run Full</button></div>`):"";
+ const load=wfBox("Load a result",`<div class="row"><button data-bact="load">Load result from bridge folder</button><label class="mute" style="flex:none">or upload .json <input type="file" id="bpfile" accept=".json,.txt,application/json"></label></div>`);
+ return`<h2>First Draft</h2>${wfSteps()}${start}${wfLinkBox()}${wfMsg()}${wfProgBox("Progress")}${load}${review}`}
+
+V.bp=()=>wfScreen("bp");V.draft=wfDraft;V.edit=()=>wfScreen("edit");
+
+/* Re-Run Full: archive then clear every chapter's prose; blueprint, voice, characters and all other inputs stay */
+async function wfClean(){
+ const stem=brStem(),rm=async(dir,pred)=>{try{const names=[];for await(const [n,h] of dir.entries())if(h.kind==="file"&&pred(n))names.push(n);for(const n of names)await dir.removeEntry(n)}catch(e){}};
+ try{const rs=await brSub("responses");await rm(rs,n=>n===stem+"-progress.json"||n===stem+"-complete.json");try{await rm(await rs.getDirectoryHandle("chapters"),n=>n.startsWith(stem+"-ch"))}catch(e){}}catch(e){}
+ try{await rm(await brSub("state"),n=>n.startsWith(stem+"-ch")||n==="STOP")}catch(e){}}
+async function wfRerun(){
+ if(!brDir||!await brPerm(true)){brMsg="Link the bridge folder first.";return render()}
+ const n=wfWritten();
+ if(!await ask("Re-run the full first draft? This clears the prose of "+n+" chapter"+(n===1?"":"s")+" and starts again from the Blueprint page. The old text is kept in each chapter's Version History. Your blueprint, voice and every other input stay as they are.",{ok:"Clear and re-run"}))return;
+ P.chapters.forEach(c=>{if(rv(c.text)){c.versions=c.versions||[];c.versions.unshift({t:Date.now(),text:c.text,note:"Before Re-Run Full"});c.versions=c.versions.slice(0,20);c.text=""}c.status="Planned"});
+ wfLast=null;await wfClean();
+ const W=wf();W.confirmed=wfHash();W.confirmedAt=new Date().toISOString();W.run={kind:"rerun",at:Date.now()};
+ brMode="write";brRange="all";save();view="bp";await brSend()}
+
+document.addEventListener("click",async e=>{
+ const b=e.target.closest("[data-wf]");if(!b)return;const a=b.dataset.wf,W=wf();
+ if(a==="confirm"){W.confirmed=wfHash();W.confirmedAt=new Date().toISOString();save();render()}
+ else if(a==="unconfirm"){W.confirmed="";save();render()}
+ else if(a==="dlbp")bpDownload();
+ else if(a==="start"){if(!wfOK()||!brDir)return;brMode="write";brRange="all";W.run={kind:"draft",at:Date.now()};save();await brSend()}
+ else if(a==="rerun")wfRerun();
+ else if(a==="sendedit"){W.run={kind:"edit",at:Date.now()};save();await brSend()}
+ else if(a==="dlfinal"){bpWithText=true;let s;try{s=JSON.stringify(blueprintJSON(),null,2)}finally{bpWithText=false}dl(slug(P.name||"novel")+"-final-package.json",s)}
+ else if(a==="dlnovel")dlNovel();
+});
 
 (async function boot(){
  await idb();

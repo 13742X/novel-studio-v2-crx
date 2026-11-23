@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Novel Studio 3",
-  "version": "3.3.3",
+  "version": "3.3.5",
   "description": "Novel planning, continuity, chapter KPIs and AI prompt builder in the Chrome side panel, next to Google Docs.",
   "minimum_chrome_version": "114",
   "permissions": ["sidePanel", "clipboardRead", "clipboardWrite", "unlimitedStorage"],
