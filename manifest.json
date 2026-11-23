@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Novel Studio 3",
+  "version": "3.3.3",
+  "description": "Novel planning, continuity, chapter KPIs and AI prompt builder in the Chrome side panel, next to Google Docs.",
+  "minimum_chrome_version": "114",
+  "permissions": ["sidePanel", "clipboardRead", "clipboardWrite", "unlimitedStorage"],
+ "host_permissions": [
+  "https://api.openai.com/*",
+  "https://api.anthropic.com/*",
+  "http://127.0.0.1/*",
+  "http://localhost/*"
+],
+  "web_accessible_resources": [{
+  "resources": ["templates/*", "samples/*"],
+  "matches": ["<all_urls>"]
+}],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": {
+    "default_title": "Open Novel Studio",
+    "default_icon": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+  },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+}
