@@ -2255,9 +2255,13 @@ async function brSend(){
  const json=brJson(),name=brStem()+".json";
  if(!await brPerm(true)){await dl(name,json);brMsg="No folder linked, so "+name+" was downloaded. Put it in the bridge's packages folder.";return render()}
  try{
+  try{const st=await brSub("state",1);await st.removeEntry("STOP").catch(()=>{});await st.removeEntry("KILL").catch(()=>{})}catch(e){}
   const written=P.chapters.filter(c=>rv(c.text)).length,left=P.chapters.length-written;
-  await brWrite(await brSub("packages",1),name,json);
-  brMsg=(voiceIsTemplate()?"Warning: Voice & Style is still the blank template, so the chapters will be written in a generic voice. Fill it in first (Story Bible, Voice & Style).\n":"")+"Blueprint sent as packages/"+name+". "+(written?written+" chapter"+(written===1?" already has":"s already have")+" text and will be kept and used as context. ":"")+left+" chapter"+(left===1?"":"s")+" for the bridge to write."
+  const pk=await brSub("packages",1);
+  await brWrite(pk,name,json);
+  const chk=await brRead(pk,name);
+  if(!chk)throw new Error("Could not verify "+name+" in packages/");
+  brMsg=(voiceIsTemplate()?"Warning: Voice & Style is still the blank template, so the chapters will be written in a generic voice. Fill it in first (Story Bible, Voice & Style).\n":"")+"Blueprint sent and verified as packages/"+name+". "+(written?written+" chapter"+(written===1?" already has":"s already have")+" text and will be kept and used as context. ":"")+left+" chapter"+(left===1?"":"s")+" for the bridge to write."
  }catch(e){brMsg="Could not write to the folder: "+e.message}
  render()}
 async function brFile(){ /* the finished file if there is one, otherwise the latest progress */
@@ -2370,30 +2374,190 @@ function navHTML(){
  return gear+NAV.map(x=>Array.isArray(x)?a(x):g(x.grp)+x.items.map(a).join("")).join("")}
 
 /* live progress: polls the bridge's response file every 4s and updates only #wfprog, so typed text elsewhere is never lost */
+/* live progress & readiness: polls the bridge folder every 4s and updates #wfenv / #wfrun / #wfprog without losing focus */
 let wfLast=null;
+let wfEnv={checkedAt:0,checking:false,ollama:{checked:false,ok:false,err:"",models:[],url:""},bridge:{ok:false,age:null,pid:null,busy:false},pkg:false,paused:false};
+
+async function wfReadState(){
+ if(!brDir){wfEnv.bridge={ok:false,age:null,pid:null,busy:false};wfEnv.pkg=false;wfEnv.paused=false;return}
+ try{
+  if(!await brPerm(false))return;
+  try{const pk=await brSub("packages");wfEnv.pkg=!!(await brRead(pk,brStem()+".json"))}catch(e){wfEnv.pkg=false}
+  try{
+   const st=await brSub("state");
+   try{await st.getFileHandle("STOP");wfEnv.paused=true}catch(e){wfEnv.paused=false}
+   const al=await brRead(st,"alive.json");
+   if(al){const j=JSON.parse(al),age=Math.max(0,Math.round(Date.now()/1000-(+j.ts||0)));wfEnv.bridge={ok:age<15,age,pid:j.pid||null,busy:!!j.busy}}
+   else wfEnv.bridge={ok:false,age:null,pid:null,busy:false};
+  }catch(e){wfEnv.bridge={ok:false,age:null,pid:null,busy:false};wfEnv.paused=false}
+ }catch(e){}
+}
+
+async function wfCheckOllama(force){
+ llmInit();
+ const url=String(LLM.ollama_url||"http://localhost:11434").trim().replace(/\/+$/,"");
+ if(!force&&wfEnv.ollama.checked&&Date.now()-wfEnv.checkedAt<15000)return wfEnv.ollama.ok;
+ wfEnv.checking=true;wfEnv.checkedAt=Date.now();
+ try{
+  const r=await llmFetch(url+"/api/tags",{},4000);
+  if(!r.ok)throw new Error("HTTP "+r.status);
+  const tags=(await r.json()).models;
+  if(!Array.isArray(tags))throw new Error("Unexpected response from Ollama");
+  const usable=tags.map(m=>m&&m.name).filter(n=>n&&!/embed|rerank/i.test(n)).sort();
+  if(!LLM.installed_models.length&&usable.length){
+   LLM.installed_models=usable;
+   for(const [role] of LLM_ROLES)if(!usable.includes(LLM.models[role]))LLM.models[role]=llmSuggest(role,usable);
+   LLM.models.summary=LLM.models.audit;
+   llmPersistLocal();
+  }
+  wfEnv.ollama={checked:true,ok:true,err:"",models:usable,url};
+ }catch(e){
+  wfEnv.ollama={checked:true,ok:false,err:(e&&e.name==="AbortError"?"No answer in 4s":(e&&e.message)||String(e)),models:[],url};
+ }finally{wfEnv.checking=false}
+ return wfEnv.ollama.ok;
+}
+
+async function wfCheckEnv(force){
+ await wfReadState();
+ await wfCheckOllama(force);
+ const el=$("#wfenv");if(el)el.innerHTML=wfEnvHTML();
+}
+
+function wfEnvHTML(){
+ llmInit();
+ const o=wfEnv.ollama,b=wfEnv.bridge;
+ const oBad=!o.checked?"Checking Ollama…":!o.ok?`✗ Ollama not reachable at ${esc(o.url||LLM.ollama_url)} (${esc(o.err)}). Start Ollama first.`
+  :llmValidate().length?`⚠ Ollama running, but models need attention: ${esc(llmValidate()[0])}`
+  :`✓ Ollama running at ${esc(o.url)} · write: ${esc(LLM.models.draft1)}, edit: ${esc(LLM.models.draft2)}, audit: ${esc(LLM.models.audit)}`;
+ const bLine=!brDir?"✗ Bridge folder not linked yet."
+  :b.ok?`✓ Bridge folder “${esc(brDir.name)}” · bridge.py running (PID ${b.pid||"?"})`
+  :`⚠ Bridge folder “${esc(brDir.name)}” linked, but bridge.py is not detected (run: python bridge.py)`;
+ const pLine=!brDir?"—":wfEnv.pkg?`✓ Package in packages/${esc(brStem())}.json`:"Ready to send blueprint to packages/";
+ return`<div class="mute" style="line-height:1.6">
+  <div>${oBad}</div>
+  <div>${bLine}</div>
+  <div>${pLine}</div>
+ </div>
+ <div class="row" style="margin:8px 0 0">
+  <button class="sm" data-wf="checkenv" ${wfEnv.checking?"disabled":""}>${wfEnv.checking?"Checking…":"Check Ollama & Bridge"}</button>
+  <button class="sm" data-bact="pick">${brDir?"Change":"Link"} bridge folder</button>
+  ${brDir?`<button class="sm" data-bact="unlink">Unlink</button><button class="sm" data-bact="status" title="Full diagnostic: folder contents, state files and log">Diagnostics</button>`:""}
+  <button class="sm" data-v="set">Model settings…</button>
+ </div>`}
+
+function wfChapterLinksHTML(s){
+ if(!s||!s.chapters||!s.chapters.length)return"";
+ return`<div style="margin:10px 0 4px"><b>Completed chapters</b> <span class="mute">(click any chapter to read or copy to clipboard)</span></div>
+ <div class="row" style="gap:6px;margin:4px 0 8px">${s.chapters.map(c=>`<button class="sm" data-wfview="${c.number}" title="Open Chapter ${c.number} text">Ch ${c.number}: ${esc(c.title)} (${c.words.toLocaleString()}w)</button>`).join("")}</div>`}
+
+function wfShowChapterModal(n){
+ const s=wfLast,c=(s&&s.chapters||[]).find(x=>x.number===n)||(P.chapters[n-1]&&{number:n,title:P.chapters[n-1].title,text:rv(P.chapters[n-1].text),summary:rv(P.chapters[n-1].summary),words:wc(P.chapters[n-1].text),bridge:null});
+ if(!c||!c.text){$("#st").textContent="Chapter "+n+" has no text yet";return}
+ const ov=document.createElement("div");ov.className="mdl";
+ const report=c.bridge&&c.bridge.auditReport?c.bridge.auditReport:"";
+ ov.innerHTML=`<div class="mdb" role="dialog" aria-modal="true" style="max-width:740px;max-height:88vh;display:flex;flex-direction:column">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:8px">
+   <b style="font-size:16px">Chapter ${c.number}: ${esc(c.title)}</b>
+   <span class="mute">${c.words.toLocaleString()} words</span>
+  </div>
+  <div style="flex:1;overflow:auto;border:1px solid var(--line);border-radius:4px;padding:14px;background:#fff;white-space:pre-wrap;font:15px/1.65 Georgia,serif;user-select:text;margin-bottom:10px">${esc(c.text)}</div>
+  ${c.summary||report?`<details style="margin-bottom:10px"><summary class="mute" style="cursor:pointer">Summary &amp; audit notes</summary><div class="box" style="max-height:160px;overflow:auto;white-space:pre-wrap;margin-top:6px;font-size:13px">${c.summary?"<b>Summary:</b>\n"+esc(c.summary)+"\n\n":""}${report?"<b>Audit report:</b>\n"+esc(report):""}</div></details>`:""}
+  <div class="mda" style="justify-content:space-between;flex-wrap:wrap">
+   <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="pri" data-mc="text">Copy chapter text</button>
+    <button data-mc="full">Copy with title &amp; summary</button>
+   </div>
+   <button data-mc="close">Close</button>
+  </div>
+ </div>`;
+ const close=()=>{document.removeEventListener("keydown",key,true);ov.remove()};
+ const key=e=>{if(e.key==="Escape"){e.preventDefault();e.stopPropagation();close()}};
+ ov.addEventListener("click",async e=>{
+  if(e.target===ov){close();return}
+  const b=e.target.closest("[data-mc]");if(!b)return;
+  if(b.dataset.mc==="close"){close();return}
+  const payload=b.dataset.mc==="full"
+   ?`# Chapter ${c.number}: ${c.title}\n\n`+(c.summary?`**Summary:** ${c.summary}\n\n`:"")+c.text
+   :c.text;
+  await copyOut(payload,"Chapter "+c.number+" copied to clipboard");
+  const orig=b.textContent;b.textContent="Copied ✓";setTimeout(()=>{if(b.isConnected)b.textContent=orig},1800);
+ });
+ document.addEventListener("keydown",key,true);
+ document.body.appendChild(ov);
+}
+
+function wfRunHTML(){
+ const s=wfLast,hasPkg=wfEnv.pkg,paused=wfEnv.paused||(s&&/paused|stopped/i.test(s.status||""));
+ const active=!!(s&&s.live)&&!paused;
+ const queued=hasPkg&&!s&&!paused;
+ const hasProgress=!!s||hasPkg;
+ if(!hasProgress){
+  return`<p class="mute">Starts <code>bridge.py</code> writing every unwritten chapter through Ollama in order. Completed chapters appear right below as links you can read and copy while it runs.</p>
+  <div class="row"><button class="pri" data-wf="start" ${brDir?"":"disabled"}>Start first draft</button>${brDir?"":`<span class="mute">Link the bridge folder above first.</span>`}</div>`;
+ }
+ const pct=s&&s.total?Math.round(s.done/s.total*100):0;
+ const headline=s?(s.kind==="complete"?"Finished. Ready to load into Novel Studio."
+  :paused?"Stopped / Paused. Progress so far is kept."
+  :active?(s.age!==null&&s.age<45?"Running":"Waiting on model / no heartbeat for "+s.age+"s")
+  :(s.status||"Stopped"))
+  :(queued?"Queued in packages/"+brStem()+".json — waiting for bridge.py to start…":"Paused — package kept in packages/"+brStem()+".json.");
+ const btns=[];
+ if(active||queued){
+  btns.push(`<button data-wf="stop" title="Halt the bridge cleanly and keep chapters completed so far">Stop / Pause</button>`);
+  btns.push(`<button data-wf="kill" title="Abort and delete everything generated so far, keeping the blueprint package">Kill &amp; reset</button>`);
+  btns.push(`<button data-wf="killrerun" title="Abort, delete everything generated so far, keep the package and start again from Chapter 1">Kill &amp; re-run</button>`);
+ }else if(paused){
+  if(s||hasPkg)btns.push(`<button class="pri" data-wf="resume" title="Continue from the last completed chapter">Resume</button>`);
+  if(s)btns.push(`<button data-wf="kill" title="Delete generated drafts and progress, keeping the blueprint package">Kill &amp; reset</button>`);
+  btns.push(`<button data-wf="killrerun" title="Clear any partial progress, keep the package and start fresh from Chapter 1">Re-run from Ch 1</button>`);
+ }else if(s&&s.kind==="complete"){
+  btns.push(`<button class="pri" data-bact="load">Load result into Novel Studio</button>`);
+  btns.push(`<button data-wf="kill" title="Delete generated drafts and keep the package ready">Kill &amp; reset</button>`);
+  btns.push(`<button data-wf="killrerun" title="Discard this draft, keep the package and re-run from Chapter 1">Kill &amp; re-run</button>`);
+ }else{
+  btns.push(`<button class="pri" data-wf="start">Start / Resume</button>`);
+  btns.push(`<button data-wf="kill">Kill &amp; reset</button>`);
+  btns.push(`<button data-wf="killrerun">Kill &amp; re-run</button>`);
+ }
+ return`<div><b>${esc(headline)}</b>${s&&s.detail?`<div class="mute">${esc(s.detail)}</div>`:""}</div>
+ ${s?`<div style="height:10px;background:rgba(128,128,128,.25);border-radius:5px;margin:8px 0;overflow:hidden"><div style="height:100%;width:${pct}%;background:currentColor;opacity:.6"></div></div>
+ <div class="mute">${s.done} of ${s.total} chapters with text · ${s.words.toLocaleString()} words</div>`:""}
+ <div class="row" style="margin:10px 0 4px">${btns.join("")}</div>
+ ${s&&s.error?`<div class="box warn" style="margin-top:6px;white-space:pre-wrap">${esc(s.error)}</div>`:""}
+ ${wfChapterLinksHTML(s)}
+ ${s&&s.log?`<details style="margin-top:8px"><summary class="mute">Activity log</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:220px;overflow:auto">${esc(s.log)}</pre></details>`:""}`;
+}
+
 function wfProgHTML(){
  const s=wfLast;if(!s)return`<span class="mute">No run yet. Progress shows here while bridge.py works.</span>`;
  const pct=s.total?Math.round(s.done/s.total*100):0;
- const state=s.kind==="complete"?"Finished. Ready to load.":s.live?(s.age!==null&&s.age<45?"Working":"No heartbeat for "+s.age+"s (slow model call, paused, or bridge stopped)"):(s.status||"Stopped");
+ const state=s.kind==="complete"?"Finished. Ready to load.":wfEnv.paused?"Stopped / Paused.":s.live?(s.age!==null&&s.age<45?"Working":"No heartbeat for "+s.age+"s (slow model call, paused, or bridge stopped)"):(s.status||"Stopped");
  return`<div><b>${esc(state)}</b>${s.detail?`<div class="mute">${esc(s.detail)}</div>`:""}</div>
  <div style="height:10px;background:rgba(128,128,128,.25);border-radius:5px;margin:8px 0;overflow:hidden"><div style="height:100%;width:${pct}%;background:currentColor;opacity:.6"></div></div>
  <div class="mute">${s.done} of ${s.total} chapters with text · ${s.words.toLocaleString()} words</div>
  ${s.error?`<div class="box warn" style="margin-top:6px;white-space:pre-wrap">${esc(s.error)}</div>`:""}
+ ${wfChapterLinksHTML(s)}
  ${s.kind==="complete"?`<div class="row" style="margin-top:8px"><button class="pri" data-bact="load">Load result into Novel Studio</button></div>`:""}
  ${s.log?`<details style="margin-top:8px"><summary class="mute">Activity log</summary><pre style="white-space:pre-wrap;font-size:12px;max-height:220px;overflow:auto">${esc(s.log)}</pre></details>`:""}`}
+
 async function wfPoll(){
  if(!WF_VIEWS.includes(view)||!brDir)return;
  try{
   if(!await brPerm(false))return;
+  await wfReadState();
+  if(view==="draft"&&(!wfEnv.ollama.checked||Date.now()-wfEnv.checkedAt>20000))await wfCheckOllama(false);
   const f=await brFile();
   if(!f)wfLast=null;
   else{
    const j=JSON.parse(f.text),b=j._bridge||{},chs=j.chapters||[],hb=b.heartbeat||b.updated;
    let lg="";try{const t=await brRead(await brSub("logs"),"bridge.log");if(t)lg=t.trim().split("\n").slice(-12).join("\n")}catch(e){}
-   wfLast={kind:f.kind,status:b.status||"",detail:b.detail||"",done:chs.filter(c=>rv(c.text)).length,total:chs.length,words:chs.reduce((a,c)=>a+wc(c.text),0),
-    age:hb?Math.round((Date.now()-new Date(hb).getTime())/1000):null,error:b.error||"",log:lg,
+   const chList=chs.map((c,i)=>({idx:i,number:c.number||i+1,title:c.title||"Chapter "+(i+1),text:rv(c.text),summary:rv(c.summary),words:wc(c.text),bridge:c.bridge||null})).filter(c=>c.text);
+   wfLast={kind:f.kind,status:b.status||"",detail:b.detail||"",done:chList.length,total:chs.length,words:chs.reduce((a,c)=>a+wc(c.text),0),
+    age:hb?Math.round((Date.now()-new Date(hb).getTime())/1000):null,error:b.error||"",log:lg,chapters:chList,
     live:f.kind!=="complete"&&b.active!==false&&!/^(complete|failed|paused|finished)/.test(b.status||"")};
   }
+  const e=$("#wfenv");if(e)e.innerHTML=wfEnvHTML();
+  const r=$("#wfrun");if(r)r.innerHTML=wfRunHTML();
   const el=$("#wfprog");if(el)el.innerHTML=wfProgHTML();
  }catch(e){}}
 setInterval(wfPoll,4000);
@@ -2406,10 +2570,9 @@ function wfSteps(){
 const wfMsg=()=>brMsg?`<div class="box" style="margin:10px 0;white-space:pre-wrap">${esc(brMsg)}</div>`:"";
 function wfLinkBox(){
  if(brDir===undefined){brDir=null;brLoadDir().then(render)}
- return wfBox("Bridge folder",`<div class="row"><button class="sm" data-bact="pick">${brDir?"Change":"Link"} bridge folder</button>${brDir?`<button class="sm" data-bact="unlink">Unlink</button>`:""}<button class="sm" data-bact="status" title="Full diagnostic: folder contents, state files and the log">Diagnostics</button><button class="sm" data-bact="pause">Pause</button><button class="sm" data-bact="resume">Clear pause</button><span class="mute">${brDir?"Linked: “"+esc(brDir.name)+"”":"Not linked. Live progress needs the folder that bridge.py uses."} Models and Ollama address are in Settings.</span></div>`)}
+ return wfBox("Bridge folder",`<div class="row"><button class="sm" data-bact="pick">${brDir?"Change":"Link"} bridge folder</button>${brDir?`<button class="sm" data-bact="unlink">Unlink</button>`:""}<button class="sm" data-bact="status" title="Full diagnostic: folder contents, state files and the log">Diagnostics</button><span class="mute">${brDir?"Linked: “"+esc(brDir.name)+"”":"Not linked. Live progress needs the folder that bridge.py uses."} Models and Ollama address are in Settings.</span></div>`)}
 const wfProgBox=title=>wfBox(title,`<div id="wfprog">${wfProgHTML()}</div>`);
 
-/* Blueprint (mode "bp") and Edit (mode "edit") are the same screen: template and import on top, then the mode's controls, then live progress */
 function wfScreen(mode){
  const E=mode==="edit",w=wfWritten();
  const panel=bpPanel().replace("<details class=\"box\"","<details open class=\"box\"");
@@ -2435,25 +2598,104 @@ function wfScreen(mode){
  <div class="row" style="margin:8px 0"><button data-wf="dlbp">Download template / current state</button></div>
  ${panel}${ctl}${wfLinkBox()}${wfMsg()}${wfProgBox(E?"AI editor at work":"Live progress")}${fin}`}
 
-/* First Draft */
 function wfDraft(){
- const ok=wfOK(),w=wfWritten(),n=P.chapters.length;
- if(!ok&&!w)return`<h2>First Draft</h2>${wfSteps()}${wfBox("Locked",`<p>Confirm the Blueprint first. ${wf().confirmed?"It has changed since you confirmed it.":""}</p><div class="row"><button class="pri" data-v="bp">Go to Blueprint</button></div>`)}`;
- const start=ok&&!w?wfBox("Start",`<p class="mute">bridge.py writes every chapter in order through Ollama, summarising each one as it goes. Keep bridge.py running against the linked folder.</p><div class="row"><button class="pri" data-wf="start" ${brDir?"":"disabled"}>Start first draft</button>${brDir?"":`<span class="mute">Link the bridge folder below first.</span>`}</div>`):"";
+ if(brDir===undefined){brDir=null;brLoadDir().then(()=>{wfCheckEnv(false);wfPoll();render()})}
+ else if(!wfEnv.ollama.checked&&!wfEnv.checking)setTimeout(()=>wfCheckEnv(false),0);
+ const ok=wfOK(),w=wfWritten(),n=P.chapters.length,hasRun=!!(wfLast||wfEnv.pkg);
+ if(!ok&&!w&&!hasRun)return`<h2>First Draft</h2>${wfSteps()}${wfBox("Locked",`<p>Confirm the Blueprint first. ${wf().confirmed?"It has changed since you confirmed it.":""}</p><div class="row"><button class="pri" data-v="bp">Go to Blueprint</button></div>`)}`;
+ const guide=wfBox("Readiness &amp; Bridge folder",`<div id="wfenv">${wfEnvHTML()}</div>`);
+ const runBox=wfBox("First Draft run",`<div id="wfrun">${wfRunHTML()}</div>`);
  const rows=P.chapters.map((c,i)=>`<tr><td>${i+1}</td><td>${esc(c.title||"Untitled")}</td><td>${wc(c.text).toLocaleString()}</td><td><button class="sm" data-open="${i}">Open</button></td></tr>`).join("");
- const review=w?wfBox("Review",`<div class="mute">${w} of ${n} chapters written · ${P.chapters.reduce((a,c)=>a+wc(c.text),0).toLocaleString()} words</div>
+ const review=w?wfBox("Loaded in Novel Studio",`<div class="mute">${w} of ${n} chapters written · ${P.chapters.reduce((a,c)=>a+wc(c.text),0).toLocaleString()} words</div>
   <div style="max-height:320px;overflow:auto;margin:8px 0"><table style="width:100%"><tr><th align="left">#</th><th align="left">Chapter</th><th align="left">Words</th><th></th></tr>${rows}</table></div>
-  <div class="row"><button class="pri" data-v="edit">Edit</button><button data-wf="rerun" title="Clears every chapter's prose, keeps everything else, and restarts from the Blueprint page">Re-Run Full</button></div>`):"";
- const load=wfBox("Load a result",`<div class="row"><button data-bact="load">Load result from bridge folder</button><label class="mute" style="flex:none">or upload .json <input type="file" id="bpfile" accept=".json,.txt,application/json"></label></div>`);
- return`<h2>First Draft</h2>${wfSteps()}${start}${wfLinkBox()}${wfMsg()}${wfProgBox("Progress")}${load}${review}`}
+  <div class="row"><button class="pri" data-v="edit">Edit</button><button data-wf="rerun" title="Clears every chapter's prose in Novel Studio, keeps everything else, and restarts from the Blueprint page">Re-Run Full</button></div>`):"";
+ const load=wfBox("Load or upload manually",`<div class="row"><button data-bact="load">Load result from bridge folder</button><label class="mute" style="flex:none">or upload .json <input type="file" id="bpfile" accept=".json,.txt,application/json"></label></div>`);
+ return`<h2>First Draft</h2>${wfSteps()}${guide}${runBox}${wfMsg()}${load}${review}`}
 
 V.bp=()=>wfScreen("bp");V.draft=wfDraft;V.edit=()=>wfScreen("edit");
 
-/* Re-Run Full: archive then clear every chapter's prose; blueprint, voice, characters and all other inputs stay */
 async function wfClean(){
  const stem=brStem(),rm=async(dir,pred)=>{try{const names=[];for await(const [n,h] of dir.entries())if(h.kind==="file"&&pred(n))names.push(n);for(const n of names)await dir.removeEntry(n)}catch(e){}};
  try{const rs=await brSub("responses");await rm(rs,n=>n===stem+"-progress.json"||n===stem+"-complete.json");try{await rm(await rs.getDirectoryHandle("chapters"),n=>n.startsWith(stem+"-ch"))}catch(e){}}catch(e){}
- try{await rm(await brSub("state"),n=>n.startsWith(stem+"-ch")||n==="STOP")}catch(e){}}
+ try{await rm(await brSub("state"),n=>n.startsWith(stem+"-ch")||n==="STOP"||n==="KILL")}catch(e){}}
+
+async function wfStart(){
+ if(!brDir){await brPick();if(!brDir)return}
+ if(!await brPerm(true)){brMsg="Folder permission was not granted.";return render()}
+ brMsg="Checking Ollama, models, and bridge folder…";render();
+ await wfReadState();
+ const oOk=await wfCheckOllama(true);
+ if(!oOk){
+  brMsg="Cannot start: Ollama is not running or not reachable at "+wfEnv.ollama.url+".\nStart Ollama first, then click Start first draft again.";
+  return render();
+ }
+ const errs=llmValidate();
+ if(errs.length){
+  brMsg="Cannot start until Ollama models are valid:\n- "+errs.join("\n- ")+"\nGo to Settings → Ollama model setup and save.";
+  return render();
+ }
+ await llmWriteFile();
+ if(!wfEnv.bridge.ok){
+  if(!await ask("bridge.py does not appear to be running against folder “"+brDir.name+"”.\n\nStart it in Terminal with:\npython bridge.py --data \""+brDir.name+"\"\n\nSend the blueprint to packages/ anyway so it starts as soon as bridge.py runs?",{ok:"Send to packages/",cancel:"Cancel"})){
+   brMsg="Cancelled. Start bridge.py, then click Start first draft.";return render();
+  }
+ }
+ brMode="write";brRange="all";wf().run={kind:"draft",at:Date.now()};save();
+ await brSend();
+ await wfPoll();
+ render();
+}
+
+async function wfStop(){
+ if(!await brPerm(true)){brMsg="Link the bridge folder first.";return render()}
+ try{
+  const st=await brSub("state",1);
+  await brWrite(st,"STOP","stop");
+  wfEnv.paused=true;
+  brMsg="Stop requested — halting bridge cleanly and keeping chapters completed so far.";
+ }catch(e){brMsg="Could not stop: "+e.message}
+ await wfPoll();render();
+}
+
+async function wfResume(){
+ if(!await brPerm(true)){brMsg="Link the bridge folder first.";return render()}
+ try{
+  const pk=await brSub("packages",1),name=brStem()+".json";
+  if(!(await brRead(pk,name)))await brWrite(pk,name,brJson());
+  const st=await brSub("state",1);
+  await st.removeEntry("KILL").catch(()=>{});
+  await st.removeEntry("STOP").catch(()=>{});
+  wfEnv.paused=false;
+  brMsg="Resuming — bridge.py will continue from the last completed chapter.";
+ }catch(e){brMsg="Could not resume: "+e.message}
+ await wfPoll();render();
+}
+
+async function wfKill(andRerun){
+ const msg=andRerun
+  ?"Kill the current run, delete everything the bridge has generated (drafts, progress, state), keep the blueprint package, and re-run from Chapter 1?"
+  :"Kill the current run and delete everything the bridge has generated (drafts, progress, state)? Your blueprint package in packages/ will be kept.";
+ if(!await ask(msg,{ok:andRerun?"Kill & re-run":"Kill & reset"}))return;
+ if(!await brPerm(true)){brMsg="Link the bridge folder first.";return render()}
+ try{
+  const stem=brStem(),pk=await brSub("packages",1),name=stem+".json";
+  if(!(await brRead(pk,name)))await brWrite(pk,name,brJson());
+  const st=await brSub("state",1);
+  const isBusy=wfEnv.bridge.ok&&wfLast&&wfLast.live;
+  if(isBusy){
+   if(andRerun){await st.removeEntry("STOP").catch(()=>{});await brWrite(st,"KILL","rerun")}
+   else{await brWrite(st,"STOP","stop");await brWrite(st,"KILL","stop")}
+   brMsg=andRerun?"Stopping run, deleting generated outputs, keeping package and restarting from Chapter 1…":"Stopping run and deleting generated outputs (package kept in packages/"+name+")…";
+  }else{
+   await wfClean();
+   if(andRerun){await st.removeEntry("STOP").catch(()=>{});brMsg="Cleared generated outputs; kept packages/"+name+" and restarted from Chapter 1."}
+   else{await brWrite(st,"STOP","stop");brMsg="Cleared generated outputs; kept packages/"+name+" (ready when you click Start / Re-run)."}
+  }
+  wfLast=null;wfEnv.pkg=true;wfEnv.paused=!andRerun;
+ }catch(e){brMsg="Could not kill/reset: "+e.message}
+ await wfPoll();render();
+}
+
 async function wfRerun(){
  if(!brDir||!await brPerm(true)){brMsg="Link the bridge folder first.";return render()}
  const n=wfWritten();
@@ -2464,11 +2706,18 @@ async function wfRerun(){
  brMode="write";brRange="all";save();view="bp";await brSend()}
 
 document.addEventListener("click",async e=>{
+ const v=e.target.closest("[data-wfview]");
+ if(v){wfShowChapterModal(+v.dataset.wfview);return}
  const b=e.target.closest("[data-wf]");if(!b)return;const a=b.dataset.wf,W=wf();
  if(a==="confirm"){W.confirmed=wfHash();W.confirmedAt=new Date().toISOString();save();render()}
  else if(a==="unconfirm"){W.confirmed="";save();render()}
  else if(a==="dlbp")bpDownload();
- else if(a==="start"){if(!wfOK()||!brDir)return;brMode="write";brRange="all";W.run={kind:"draft",at:Date.now()};save();await brSend()}
+ else if(a==="checkenv"){await wfCheckEnv(true)}
+ else if(a==="start"){if(!wfOK()&&!wfWritten())return;await wfStart()}
+ else if(a==="stop"){await wfStop()}
+ else if(a==="resume"){await wfResume()}
+ else if(a==="kill"){await wfKill(false)}
+ else if(a==="killrerun"){await wfKill(true)}
  else if(a==="rerun")wfRerun();
  else if(a==="sendedit"){W.run={kind:"edit",at:Date.now()};save();await brSend()}
  else if(a==="dlfinal"){bpWithText=true;let s;try{s=JSON.stringify(blueprintJSON(),null,2)}finally{bpWithText=false}dl(slug(P.name||"novel")+"-final-package.json",s)}
